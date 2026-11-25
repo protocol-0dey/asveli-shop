@@ -1,0 +1,24 @@
+services:
+  api:
+    build: .
+    image: ${ASVELI_IMAGE:-asveli-api:local}     # CI/CD sets ASVELI_IMAGE (ghcr.io/…:tag); locally the image is built from this folder
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Inside the container the admin listener must bind 0.0.0.0, otherwise Docker's port mapping cannot reach it.
+      # That is safe ONLY because the host side below is published on 127.0.0.1. Do not change those two lines.
+      ADMIN_PORT: "3001"
+      ADMIN_HOST: "0.0.0.0"
+      ADMIN_ALLOW_NONLOOPBACK: "1"
+    ports:
+      - "127.0.0.1:3000:3000"        # PUBLIC API: reachable only by nginx running on this same machine
+      - "127.0.0.1:3001:3001"        # ADMIN PANEL: reachable only from this machine → open it through an SSH tunnel (see README)
+    volumes:
+      - asveli-data:/data            # SQLite database (+ blobs when STORAGE_DRIVER=local)
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 512m
+volumes:
+  asveli-data:

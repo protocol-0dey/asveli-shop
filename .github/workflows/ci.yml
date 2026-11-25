@@ -1,0 +1,100 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request:
+concurrency: { group: 'ci-${{ github.ref }}', cancel-in-progress: true }
+permissions: { contents: read }
+
+jobs:
+  backend:
+    name: Backend (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy: { fail-fast: false, matrix: { node: [20, 22] } }
+    defaults: { run: { working-directory: backend } }
+    services:                                   # real databases for the SQL-mirror tests (test/data.test.js)
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_PASSWORD: pw, POSTGRES_DB: mirror }
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+      mariadb:
+        image: mariadb:11
+        env: { MARIADB_ROOT_PASSWORD: rootpw, MARIADB_DATABASE: mirror, MARIADB_USER: asv, MARIADB_PASSWORD: asvpass }
+        ports: ['3306:3306']
+        options: --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ matrix.node }}', cache: npm, cache-dependency-path: backend/package-lock.json }
+      - run: npm ci
+      - run: npm test
+        env: { PG_TEST_URL: 'postgres://postgres:pw@127.0.0.1:5432/mirror', MYSQL_TEST_URL: 'mysql://asv:asvpass@127.0.0.1:3306/mirror' }
+      - name: Dependency audit (production, high+)
+        run: npm audit --omit=dev --audit-level=high
+
+  storefront:
+    name: Storefront (types, i18n, unit, build)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: storefront } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: storefront/package-lock.json }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run check:i18n
+      - run: npm test
+      - run: npm run build
+        env: { VITE_API_URL: 'https://api.asveli.com' }
+      - uses: actions/upload-artifact@v4
+        with: { name: storefront-dist, path: storefront/dist, retention-days: 7 }
+
+  e2e:
+    name: E2E (Playwright, real backend)
+    runs-on: ubuntu-latest
+    needs: [backend, storefront]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+        working-directory: backend
+      - run: npm ci
+        working-directory: storefront
+      - run: npx playwright install --with-deps chromium
+        working-directory: storefront
+      - run: npx playwright test
+        working-directory: storefront
+        env: { CI: 'true', BACKEND_DIR: ../backend }
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with: { name: playwright-report, path: 'storefront/playwright-report storefront/test-results', retention-days: 7 }
+
+  docker:
+    name: Docker image builds and starts
+    runs-on: ubuntu-latest
+    needs: [backend]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t asveli-api:ci backend
+      - name: Start the container and wait for /api/health
+        run: |
+          docker run -d --name api -p 127.0.0.1:3000:3000 \
+            -e NODE_ENV=production \
+            -e SESSION_SECRET="$(head -c 48 /dev/urandom | base64 -w0)" \
+            -e DATA_ENCRYPTION_KEY="$(head -c 48 /dev/urandom | base64 -w0)" \
+            -e STORAGE_DRIVER=local -e ALLOWED_ORIGINS=https://asveli.com \
+            asveli-api:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:3000/api/health && exit 0; sleep 1; done
+          docker logs api; exit 1
+      - name: Admin panel must not answer on the public port
+        run: test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/admin/me)" = 404
+
+  secrets-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}' }

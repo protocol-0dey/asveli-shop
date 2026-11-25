@@ -1,0 +1,5 @@
+node_modules
+dist
+.build-i18n
+test-results
+playwright-report

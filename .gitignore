@@ -1,0 +1,14 @@
+node_modules/
+**/data/
+**/data-local/
+.env
+.env.local
+*.db
+*.sqlite*
+*.log
+dist/
+.build-i18n/
+test-results/
+playwright-report/
+*.pem
+*.key

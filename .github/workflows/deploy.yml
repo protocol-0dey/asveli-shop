@@ -1,0 +1,71 @@
+name: Deploy
+# Runs on a version tag (v1.2.3) or by hand. Needs the "production" environment (add required reviewers there for a manual approval gate).
+on:
+  push: { tags: ['v*'] }
+  workflow_dispatch:
+concurrency: { group: deploy-production, cancel-in-progress: false }
+permissions: { contents: read }
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/asveli-api
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    outputs: { tag: '${{ steps.meta.outputs.tag }}' }
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        run: echo "tag=${GITHUB_REF_NAME//[^A-Za-z0-9_.-]/-}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: '${{ github.actor }}', password: '${{ secrets.GITHUB_TOKEN }}' }
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: storefront/package-lock.json }
+      - run: npm ci && npm run check && npm run build
+        working-directory: storefront
+        env: { VITE_API_URL: '${{ vars.API_URL || ''https://api.asveli.com'' }}' }
+      - uses: actions/upload-artifact@v4
+        with: { name: storefront-dist, path: storefront/dist }
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: storefront-dist, path: dist }
+      - name: SSH setup (host key is pinned, never trusted on first use)
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          printf 'Host prod\n  HostName %s\n  User %s\n  IdentityFile ~/.ssh/id_deploy\n  StrictHostKeyChecking yes\n' "${{ secrets.DEPLOY_HOST }}" "${{ secrets.DEPLOY_USER }}" > ~/.ssh/config
+      - name: Storefront → /var/www/asveli (atomic swap)
+        run: |
+          rsync -az --delete dist/ prod:/var/www/asveli.new/
+          ssh prod 'sudo rm -rf /var/www/asveli.old && { [ -d /var/www/asveli ] && sudo mv /var/www/asveli /var/www/asveli.old || true; } && sudo mv /var/www/asveli.new /var/www/asveli'
+      - name: API → pull, restart, health-check, roll back on failure
+        run: |
+          ssh prod bash -s -- "${{ env.IMAGE }}:${{ needs.build.outputs.tag }}" <<'REMOTE'
+          set -euo pipefail
+          NEW="$1"; cd /opt/asveli
+          [ -f .deploy.env ] && cp .deploy.env .deploy.env.prev || : > .deploy.env.prev
+          printf 'ASVELI_IMAGE=%s\n' "$NEW" > .deploy.env
+          docker compose --env-file .deploy.env pull api
+          docker compose --env-file .deploy.env up -d api
+          for i in $(seq 1 40); do curl -fsS http://127.0.0.1:3000/api/health >/dev/null && { echo "healthy: $NEW"; exit 0; }; sleep 1; done
+          echo "unhealthy, rolling back" >&2
+          if [ -s .deploy.env.prev ]; then cp .deploy.env.prev .deploy.env; docker compose --env-file .deploy.env up -d api; fi
+          exit 1
+          REMOTE
