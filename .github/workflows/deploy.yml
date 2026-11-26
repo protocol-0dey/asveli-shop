@@ -15,7 +15,7 @@ jobs:
     permissions: { contents: read, packages: write }
     outputs: { tag: '${{ steps.meta.outputs.tag }}' }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: meta
         run: echo "tag=${GITHUB_REF_NAME//[^A-Za-z0-9_.-]/-}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@v3
