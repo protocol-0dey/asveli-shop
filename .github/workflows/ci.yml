@@ -46,7 +46,7 @@ jobs:
       - run: npm test
       - run: npm run build
         env: { VITE_API_URL: 'https://api.asveli.com' }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: storefront-dist, path: storefront/dist, retention-days: 7 }
 
   e2e:
@@ -66,7 +66,7 @@ jobs:
       - run: npx playwright test
         working-directory: storefront
         env: { CI: 'true', BACKEND_DIR: ../backend }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with: { name: playwright-report, path: 'storefront/playwright-report storefront/test-results', retention-days: 7 }
 

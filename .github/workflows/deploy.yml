@@ -35,7 +35,7 @@ jobs:
       - run: npm ci && npm run check && npm run build
         working-directory: storefront
         env: { VITE_API_URL: '${{ vars.API_URL || ''https://api.asveli.com'' }}' }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: storefront-dist, path: storefront/dist }
 
   deploy:
